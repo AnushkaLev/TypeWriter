@@ -98,7 +98,7 @@ body {
 
 /* Paper: starts at top=0 so it slides behind ruler+platen */
 .paper-mask {
-  position:absolute; top:0; left:4%; right:4%;
+  position:absolute; top:0; left:10%; right:10%;
   height:290px; overflow:hidden; z-index:2;
 }
 .paper-inner {
@@ -142,7 +142,7 @@ body {
 
 /* ── CARRIAGE ── */
 .carriage-track {
-  position:absolute; top:26px; left:3%; right:3%;
+  position:absolute; top:26px; left:10%; right:10%;
   height:36px; z-index:10;
 }
 .carriage {
@@ -580,16 +580,12 @@ const LINES_PER_PAGE = 8; // lines before paper starts scrolling up
 // Carriage drag sets the NEXT line's indent (pending), not the current typed line.
 // currentDragIndent holds the px a user has dragged to; applied on next newLine().
 // ─────────────────────────────────────────────────────
-let lines = [{ indent: 0, segments: [] }];
+let lines = [{ indent: 0, segments: [], cursorPos: 0 }];
 let cur = 0;
 let inkColor = '#0e0e0e';
 let isShift = false, isCaps = false;
 let bellShown = false;
-
-// The indent that carriage is currently showing (updated freely on drag)
-// Applied to the current line as long as that line is empty, OR stored as
-// nextIndent to be applied when a new line starts.
-let pendingIndent = 0;
+let pendingIndent = 0;  // indent to apply to next line (reset to 0 after return)
 
 const shiftMap = {
   '1':'!','2':'@','3':'#','4':'$','5':'%','6':'^','7':'&',
@@ -608,7 +604,7 @@ const lineEl  = document.getElementById('lineCount');
 paperEl.style.top = INITIAL_SCROLL + 'px';
 
 function trackW()      { return Math.max(1, ctrack.offsetWidth - cEl.offsetWidth); }
-function maxIndentPx() { return trackW() * 0.78; }
+function maxIndentPx() { return trackW(); } 
 
 // ─────────────────────────────────────────────────────
 // RENDER
@@ -621,7 +617,7 @@ function render() {
 
   let html = '';
   for (let i = 0; i < lines.length; i++) {
-    const { indent, segments } = lines[i];
+    const { indent, segments, cursorPos } = lines[i];
     const indentStyle = indent > 0 ? ` style="padding-left:${indent}px"` : '';
 
     let inner = '';
@@ -637,9 +633,18 @@ function render() {
       inner += `<span style="color:${col}">${chunk}</span>`;
     }
 
-    html += i === cur
-      ? `<div class="tline"${indentStyle}>${inner}<span class="cursor-blink" style="color:${inkColor}"></span></div>`
-      : `<div class="tline"${indentStyle}>${inner}</div>`;
+    if (i === cur) {
+      // For current line, position cursor at cursorPos
+      // Calculate natural cursor position accounting for character width minus 1px per char
+      const charWidth = maxIndentPx() / CHARS_PER_LINE;
+      const cursorPos_val = cursorPos || 0;
+      const naturalCursorPos = indent + (segments.length * (charWidth - 1));
+      const cursorOffset = cursorPos_val - naturalCursorPos;
+      const cursorStyle = `color:${inkColor};position:relative;left:${cursorOffset}px`;
+      html += `<div class="tline"${indentStyle}>${inner}<span class="cursor-blink" style="${cursorStyle}"></span></div>`;
+    } else {
+      html += `<div class="tline"${indentStyle}>${inner}</div>`;
+    }
   }
   textEl.innerHTML = html;
 
@@ -647,18 +652,15 @@ function render() {
   const scrollOffset = Math.max(0, cur - (LINES_PER_PAGE - 1));
   paperEl.style.top = (INITIAL_SCROLL - scrollOffset * LINE_H) + 'px';
 
-  // Carriage: show typing progress on current line (unless dragging)
+  // Update carriage position based on cursor position
   if (!isDragging) {
-    const indentNorm = lines[cur].indent / maxIndentPx();
-    const charFrac   = Math.min(lines[cur].segments.length / CHARS_PER_LINE, 1);
-    const total      = Math.min(indentNorm + charFrac * (1 - indentNorm), 1);
-    cEl.style.left = Math.round(total * trackW()) + 'px';
+    cEl.style.left = Math.round(((lines[cur].cursorPos || 0) / maxIndentPx()) * trackW()) + 'px';
   }
 
-  // Margin bell
-  const len = lines[cur].segments.length;
-  if (len >= Math.floor(CHARS_PER_LINE * 0.88) && !bellShown) { showToast(); bellShown = true; }
-  if (len < Math.floor(CHARS_PER_LINE * 0.88)) bellShown = false;
+  // Margin bell - check if approaching character limit (count only typed chars, not spaces)
+  const typedChars = lines[cur].segments.filter(s => s.ch !== ' ').length;
+  if (typedChars >= Math.floor(CHARS_PER_LINE * 0.88) && !bellShown) { showToast(); bellShown = true; }
+  if (typedChars < Math.floor(CHARS_PER_LINE * 0.88)) bellShown = false;
 }
 
 // ─────────────────────────────────────────────────────
@@ -686,21 +688,23 @@ function startDrag(e) {
 
 function onDrag(e) {
   if (!isDragging) return;
+
   const x    = e.touches ? e.touches[0].clientX : e.clientX;
-  const newL = Math.max(0, Math.min(trackW(), dStartLeft + x - dStartX));
+  const maxCarriagePos = trackW() * 0.88;  // Limit carriage to where text can extend
+  const newL = Math.max(0, Math.min(maxCarriagePos, dStartLeft + x - dStartX));
   cEl.style.left = newL + 'px';
 
   const indentPx = Math.round((newL / trackW()) * maxIndentPx());
-  pendingIndent = indentPx;
-  // If current line is empty, update indent live WITHOUT calling render()
+
+  // If current line is empty, update indent so first char will be at this position
   if (lines[cur].segments.length === 0) {
     lines[cur].indent = indentPx;
-
-    const lineEls = textEl.querySelectorAll('.tline');
-    if (lineEls[cur]) {
-      lineEls[cur].style.paddingLeft = indentPx + 'px';
-    }
   }
+  // Always update cursor position to match carriage - just the indent value, no char offsets
+  lines[cur].cursorPos = indentPx;
+  pendingIndent = indentPx;  // apply to next line
+
+  render();
 }
 
 function endDrag() {
@@ -717,7 +721,39 @@ function endDrag() {
 // TYPING
 // ─────────────────────────────────────────────────────
 function typeChar(ch) {
-  lines[cur].segments.push({ ch, color: inkColor });
+  // If this is the first character on the line, permanently store pending indent
+  if (lines[cur].segments.length === 0) {
+    lines[cur].indent = pendingIndent;
+    lines[cur].cursorPos = pendingIndent;  // Start cursor at indent position
+  }
+
+  // Check if total line length would exceed CHARS_PER_LINE
+  if (lines[cur].segments.length >= CHARS_PER_LINE) {
+    if (!bellShown) { showToast(); bellShown = true; }
+    return; // Don't type if at max line length
+  }
+
+  // Character width in pixels (approximately)
+  const charWidth = maxIndentPx() / CHARS_PER_LINE;
+  
+  // Calculate where text naturally ends in pixels
+  const currentTextEndPos = lines[cur].indent + (lines[cur].segments.length * charWidth);
+  
+  // If cursor position is beyond text end, fill gap with spaces
+  if (lines[cur].cursorPos > currentTextEndPos) {
+    const gapSizeInChars = Math.round((lines[cur].cursorPos - currentTextEndPos) / charWidth);
+    for (let i = 0; i < gapSizeInChars; i++) {
+      if (lines[cur].segments.length >= CHARS_PER_LINE) break;
+      lines[cur].segments.push({ ch: ' ', color: inkColor });
+    }
+  }
+
+  if (lines[cur].segments.length < CHARS_PER_LINE) {
+    lines[cur].segments.push({ ch, color: inkColor });
+  }
+  // Move cursor forward by one character width minus 1px (in pixels)
+  lines[cur].cursorPos += (charWidth - 1);
+  bellShown = false; // Reset since we're typing
   render(); flash(); playClick();
 }
 
@@ -742,14 +778,13 @@ function backspace() {
 
 function newLine() {
   cur = lines.length;
-  // New line uses pendingIndent (set by last carriage drag, or 0 if never dragged)
-  lines.push({ indent: pendingIndent, segments: [] });
-  pendingIndent = 0; // reset for the next line
+  // New line starts with indent 0 (left side of paper) unless user dragged carriage
+  lines.push({ indent: pendingIndent, segments: [], cursorPos: pendingIndent });
+  pendingIndent = 0; // reset to 0 for next line (default to left)
   bellShown = false;
   render(); playReturn();
-  // Snap carriage to the new line's indent position
-  const norm = lines[cur].indent / maxIndentPx();
-  cEl.style.left = Math.round(norm * trackW()) + 'px';
+  // Reset carriage to left position
+  cEl.style.left = '0px';
 }
 
 // ─────────────────────────────────────────────────────
